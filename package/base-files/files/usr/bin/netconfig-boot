@@ -15,11 +15,28 @@ command_exists() {
 
 log "开始执行netconfig-boot脚本"
 
-# 检查本地netconfig文件是否存在
+# 检查本地netconfig文件是否存在且有效（不小于1kb）
 if [ -f "/root/netconfig" ]; then
-    log "发现本地netconfig文件，跳过下载"
+    # 获取文件大小（字节）
+    if command_exists stat; then
+        file_size=$(stat -c%s "/root/netconfig" 2>/dev/null || echo "0")
+    else
+        file_size=$(wc -c < "/root/netconfig" 2>/dev/null || echo "0")
+    fi
+    
+    if [ "$file_size" -ge 1024 ]; then
+        log "发现有效的本地netconfig文件（大小: ${file_size}字节），跳过下载"
+    else
+        log "本地netconfig文件过小（${file_size}字节 < 1KB），删除并重新下载"
+        rm -f "/root/netconfig"
+    fi
 else
-    log "未找到本地netconfig文件，开始下载流程"
+    log "未找到本地netconfig文件"
+fi
+
+# 如果netconfig文件不存在，则进行下载
+if [ ! -f "/root/netconfig" ]; then
+    log "开始下载netconfig文件"
     
     # 检查wget是否存在
     if ! command_exists wget; then
@@ -27,47 +44,286 @@ else
         exit 0
     fi
 
-    # 下载URL配置
-    DOWNLOAD_URL="http://192.168.100.253/360T7/netconfig"
+    # 定义下载URL列表（按优先级排序）
+    URL1="http://192.168.100.253/360T7/netconfig"  # 局域网URL
+    URL2="https://gitee.com/hziqian/txt/raw/master/360T7/netconfig"  # Gitee备用URL
+    
+    # 下载参数
     TEMP_SCRIPT="/root/netconfig"
-
-    # 尝试下载网络配置脚本
-    MAX_RETRIES=10
+    MAX_RETRIES_PER_URL=5
     RETRY_DELAY=6
     SUCCESS=0
 
-    for i in $(seq 1 $MAX_RETRIES); do
-        # 检查目标服务器是否可达
-        if ping -c 1 -W 2 192.168.100.253 >/dev/null 2>&1; then
-            log "尝试第 $i/$MAX_RETRIES 次下载网络配置脚本"
-            
-            # 使用wget下载脚本，增加超时参数
-            if wget -q -T 5 -O "$TEMP_SCRIPT" "$DOWNLOAD_URL"; then
-                # 检查文件是否为空
-                if [ -s "$TEMP_SCRIPT" ]; then
-                    log "下载成功"
+    # 尝试第一个URL
+    log "尝试从URL1下载: $URL1"
+    domain1=$(echo "$URL1" | sed 's|http://||' | cut -d'/' -f1)
+    
+    for retry in $(seq 1 $MAX_RETRIES_PER_URL); do
+        # 对HTTP URL进行ping检测
+        if echo "$URL1" | grep -q "^http://"; then
+            if ! ping -c 1 -W 2 "$domain1" >/dev/null 2>&1; then
+                log "服务器 $domain1 不可达，等待 ${RETRY_DELAY} 秒后重试"
+                sleep $RETRY_DELAY
+                continue
+            fi
+        fi
+        
+        log "尝试第 $retry/$MAX_RETRIES_PER_URL 次下载"
+        
+        # 使用wget下载脚本，增加超时参数
+        if wget -q -T 10 -O "$TEMP_SCRIPT" "$URL1"; then
+            # 检查文件是否为空且不小于1KB
+            if [ -s "$TEMP_SCRIPT" ]; then
+                if command_exists stat; then
+                    file_size=$(stat -c%s "$TEMP_SCRIPT" 2>/dev/null || echo "0")
+                else
+                    file_size=$(wc -c < "$TEMP_SCRIPT" 2>/dev/null || echo "0")
+                fi
+                if [ "$file_size" -ge 1024 ]; then
+                    log "从 $URL1 下载成功，文件大小: ${file_size}字节"
                     SUCCESS=1
                     break
                 else
-                    log "下载的文件为空，等待 ${RETRY_DELAY} 秒后重试"
+                    log "下载的文件过小（${file_size}字节 < 1KB），删除并重试"
+                    rm -f "$TEMP_SCRIPT"
+                fi
+            else
+                log "下载的文件为空，删除并重试"
+                rm -f "$TEMP_SCRIPT"
+            fi
+        else
+            log "下载失败，等待 ${RETRY_DELAY} 秒后重试"
+        fi
+        
+        # 如果不是最后一次尝试，则等待
+        if [ $retry -lt $MAX_RETRIES_PER_URL ]; then
+            sleep $RETRY_DELAY
+        fi
+    done
+
+    # 如果第一个URL失败，尝试第二个URL
+    if [ $SUCCESS -eq 0 ]; then
+        log "URL1下载尝试失败，尝试URL2"
+        
+        # 在尝试URL2之前删除可能存在的netconfig文件
+        if [ -f "/root/netconfig" ]; then
+            log "删除可能损坏的netconfig文件"
+            rm -f "/root/netconfig"
+        fi
+        
+        for retry in $(seq 1 $MAX_RETRIES_PER_URL); do
+            log "尝试第 $retry/$MAX_RETRIES_PER_URL 次从URL2下载"
+            
+            # 使用wget下载脚本，增加超时参数
+            if wget -q -T 10 -O "$TEMP_SCRIPT" "$URL2"; then
+                # 检查文件是否为空且不小于1KB
+                if [ -s "$TEMP_SCRIPT" ]; then
+                    if command_exists stat; then
+                        file_size=$(stat -c%s "$TEMP_SCRIPT" 2>/dev/null || echo "0")
+                    else
+                        file_size=$(wc -c < "$TEMP_SCRIPT" 2>/dev/null || echo "0")
+                    fi
+                    if [ "$file_size" -ge 1024 ]; then
+                        log "从 $URL2 下载成功，文件大小: ${file_size}字节"
+                        SUCCESS=1
+                        break
+                    else
+                        log "下载的文件过小（${file_size}字节 < 1KB），删除并重试"
+                        rm -f "$TEMP_SCRIPT"
+                    fi
+                else
+                    log "下载的文件为空，删除并重试"
                     rm -f "$TEMP_SCRIPT"
                 fi
             else
                 log "下载失败，等待 ${RETRY_DELAY} 秒后重试"
             fi
+            
+            # 如果不是最后一次尝试，则等待
+            if [ $retry -lt $MAX_RETRIES_PER_URL ]; then
+                sleep $RETRY_DELAY
+            fi
+        done
+    fi
+
+    # 检查下载是否成功
+    if [ $SUCCESS -eq 0 ]; then
+        log "错误: 所有下载URL尝试均失败"
+        exit 0  # 退出但不阻止系统继续启动
+    fi
+fi
+
+# 确保文件具有执行权限
+if [ -f "/root/netconfig" ]; then
+    if chmod +x "/root/netconfig"; then
+        log "已成功给予netconfig脚本执行权限"
+    else
+        log "错误: 无法给予netconfig脚本执行权限"
+        exit 0
+    fi
+else
+    log "错误: netconfig文件不存在"
+    exit 0
+fi
+
+# 执行netconfig脚本
+log "开始执行netconfig脚本"
+sh "/root/netconfig" >> "$LOG_FILE" 2>&1
+EXEC_EXIT_CODE=$?
+log "netconfig脚本执行完成，退出码: $EXEC_EXIT_CODE"
+
+log "netconfig-boot脚本执行完成"
+exit 0#!/bin/sh
+
+# 日志文件位置
+LOG_FILE="/root/netconfig-boot.log"
+
+# 记录日志函数
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+}
+
+# 检查命令是否存在
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+log "开始执行netconfig-boot脚本"
+
+# 检查本地netconfig文件是否存在且有效（不小于1kb）
+if [ -f "/root/netconfig" ]; then
+    # 获取文件大小（字节）
+    if command_exists stat; then
+        file_size=$(stat -c%s "/root/netconfig" 2>/dev/null || echo "0")
+    else
+        file_size=$(wc -c < "/root/netconfig" 2>/dev/null || echo "0")
+    fi
+    
+    if [ "$file_size" -ge 1024 ]; then
+        log "发现有效的本地netconfig文件（大小: ${file_size}字节），跳过下载"
+    else
+        log "本地netconfig文件过小（${file_size}字节 < 1KB），删除并重新下载"
+        rm -f "/root/netconfig"
+    fi
+else
+    log "未找到本地netconfig文件"
+fi
+
+# 如果netconfig文件不存在，则进行下载
+if [ ! -f "/root/netconfig" ]; then
+    log "开始下载netconfig文件"
+    
+    # 检查wget是否存在
+    if ! command_exists wget; then
+        log "错误: 未找到wget命令，无法下载文件"
+        exit 0
+    fi
+
+    # 定义下载URL列表（按优先级排序）
+    URL1="http://192.168.100.253/360T7/netconfig"  # 局域网URL
+    URL2="https://gitee.com/hziqian/txt/raw/master/306T7/netconfig"  # Gitee备用URL
+    
+    # 下载参数
+    TEMP_SCRIPT="/root/netconfig"
+    MAX_RETRIES_PER_URL=5
+    RETRY_DELAY=6
+    SUCCESS=0
+
+    # 尝试第一个URL
+    log "尝试从URL1下载: $URL1"
+    domain1=$(echo "$URL1" | sed 's|http://||' | cut -d'/' -f1)
+    
+    for retry in $(seq 1 $MAX_RETRIES_PER_URL); do
+        # 对HTTP URL进行ping检测
+        if echo "$URL1" | grep -q "^http://"; then
+            if ! ping -c 1 -W 2 "$domain1" >/dev/null 2>&1; then
+                log "服务器 $domain1 不可达，等待 ${RETRY_DELAY} 秒后重试"
+                sleep $RETRY_DELAY
+                continue
+            fi
+        fi
+        
+        log "尝试第 $retry/$MAX_RETRIES_PER_URL 次下载"
+        
+        # 使用wget下载脚本，增加超时参数
+        if wget -q -T 10 -O "$TEMP_SCRIPT" "$URL1"; then
+            # 检查文件是否为空且不小于1KB
+            if [ -s "$TEMP_SCRIPT" ]; then
+                if command_exists stat; then
+                    file_size=$(stat -c%s "$TEMP_SCRIPT" 2>/dev/null || echo "0")
+                else
+                    file_size=$(wc -c < "$TEMP_SCRIPT" 2>/dev/null || echo "0")
+                fi
+                if [ "$file_size" -ge 1024 ]; then
+                    log "从 $URL1 下载成功，文件大小: ${file_size}字节"
+                    SUCCESS=1
+                    break
+                else
+                    log "下载的文件过小（${file_size}字节 < 1KB），删除并重试"
+                    rm -f "$TEMP_SCRIPT"
+                fi
+            else
+                log "下载的文件为空，删除并重试"
+                rm -f "$TEMP_SCRIPT"
+            fi
         else
-            log "服务器不可达，等待 ${RETRY_DELAY} 秒后重试"
+            log "下载失败，等待 ${RETRY_DELAY} 秒后重试"
         fi
         
         # 如果不是最后一次尝试，则等待
-        if [ $i -lt $MAX_RETRIES ]; then
+        if [ $retry -lt $MAX_RETRIES_PER_URL ]; then
             sleep $RETRY_DELAY
         fi
     done
 
+    # 如果第一个URL失败，尝试第二个URL
+    if [ $SUCCESS -eq 0 ]; then
+        log "URL1下载尝试失败，尝试URL2"
+        
+        # 在尝试URL2之前删除可能存在的netconfig文件
+        if [ -f "/root/netconfig" ]; then
+            log "删除可能损坏的netconfig文件"
+            rm -f "/root/netconfig"
+        fi
+        
+        for retry in $(seq 1 $MAX_RETRIES_PER_URL); do
+            log "尝试第 $retry/$MAX_RETRIES_PER_URL 次从URL2下载"
+            
+            # 使用wget下载脚本，增加超时参数
+            if wget -q -T 10 -O "$TEMP_SCRIPT" "$URL2"; then
+                # 检查文件是否为空且不小于1KB
+                if [ -s "$TEMP_SCRIPT" ]; then
+                    if command_exists stat; then
+                        file_size=$(stat -c%s "$TEMP_SCRIPT" 2>/dev/null || echo "0")
+                    else
+                        file_size=$(wc -c < "$TEMP_SCRIPT" 2>/dev/null || echo "0")
+                    fi
+                    if [ "$file_size" -ge 1024 ]; then
+                        log "从 $URL2 下载成功，文件大小: ${file_size}字节"
+                        SUCCESS=1
+                        break
+                    else
+                        log "下载的文件过小（${file_size}字节 < 1KB），删除并重试"
+                        rm -f "$TEMP_SCRIPT"
+                    fi
+                else
+                    log "下载的文件为空，删除并重试"
+                    rm -f "$TEMP_SCRIPT"
+                fi
+            else
+                log "下载失败，等待 ${RETRY_DELAY} 秒后重试"
+            fi
+            
+            # 如果不是最后一次尝试，则等待
+            if [ $retry -lt $MAX_RETRIES_PER_URL ]; then
+                sleep $RETRY_DELAY
+            fi
+        done
+    fi
+
     # 检查下载是否成功
     if [ $SUCCESS -eq 0 ]; then
-        log "错误: 经过 $MAX_RETRIES 次尝试后仍无法下载网络配置脚本"
+        log "错误: 所有下载URL尝试均失败"
         exit 0  # 退出但不阻止系统继续启动
     fi
 fi
