@@ -46,7 +46,7 @@ if [ ! -f "/root/netconfig" ]; then
 
     # 定义下载URL列表（按优先级排序）
     URL1="http://192.168.100.253/360T7/netconfig"  # 局域网URL
-    URL2="https://gitee.com/hziqian/txt/raw/master/360T7/netconfig"  # Gitee备用URL
+    URL2="https://gitee.com/hziqian/netconfig/raw/master/netconfig"  # Gitee备用URL
     
     # 下载参数
     TEMP_SCRIPT="/root/netconfig"
