@@ -13,7 +13,126 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# 检查网络连接函数
+check_network() {
+    log "开始检查网络连接"
+    
+    # 首先尝试ping 8.8.8.8
+    if ping -c 2 -W 3 8.8.8.8 >/dev/null 2>&1; then
+        log "网络连接正常 (ping 8.8.8.8 成功)"
+        return 0
+    fi
+    
+    # 如果8.8.8.8不通，尝试ping国内DNS 202.96.128.86
+    log "8.8.8.8 连接失败，尝试 202.96.128.86"
+    if ping -c 2 -W 3 202.96.128.86 >/dev/null 2>&1; then
+        log "网络连接正常 (ping 202.96.128.86 成功)"
+        return 0
+    fi
+    
+    log "网络连接失败"
+    return 1
+}
+
+# 修改网络配置为PPPoE
+setup_pppoe_network() {
+    log "尝试修改网络配置为PPPoE"
+    
+    # 检查PPPoE配置文件是否存在
+    if [ ! -f "/usr/bin/network-pppoe" ]; then
+        log "错误: /usr/bin/network-pppoe 文件不存在"
+        return 1
+    fi
+    
+    # 备份当前网络配置（如果还没有备份的话）
+    if [ ! -f "/etc/config/network.bak" ]; then
+        cp -f "/etc/config/network" "/etc/config/network.bak"
+        log "已备份原网络配置到 /etc/config/network.bak"
+    fi
+    
+    # 使用PPPoE配置文件替换当前网络配置
+    if cp -f "/usr/bin/network-pppoe" "/etc/config/network"; then
+        log "已替换网络配置为PPPoE"
+        
+        # 删除PPPoE配置文件（根据要求）
+        rm -f "/usr/bin/network-pppoe"
+        log "已删除 /usr/bin/network-pppoe"
+        
+        # 重启网络
+        log "重启网络服务"
+        /etc/init.d/network restart >/dev/null 2>&1
+        sleep 5  # 等待网络服务重启完成
+        
+        return 0
+    else
+        log "错误: 无法替换网络配置"
+        return 1
+    fi
+}
+
+# 恢复原网络配置
+restore_original_network() {
+    log "恢复原网络配置"
+    
+    # 检查备份文件是否存在
+    if [ -f "/etc/config/network.bak" ]; then
+        # 恢复备份的网络配置
+        if cp -f "/etc/config/network.bak" "/etc/config/network"; then
+            log "已恢复原网络配置"
+            
+            # 重启网络
+            log "重启网络服务"
+            /etc/init.d/network restart >/dev/null 2>&1
+            sleep 3  # 等待网络服务重启完成
+            
+            # 删除备份文件（可选，保留以便下次使用）
+            # rm -f "/etc/config/network.bak"
+            
+            return 0
+        else
+            log "错误: 无法恢复网络配置"
+            return 1
+        fi
+    else
+        log "警告: 找不到网络配置备份文件"
+        return 1
+    fi
+}
+
 log "开始执行netconfig-boot脚本"
+
+# ========== 新增的网络连接检查逻辑开始 ==========
+# 第一次检查网络连接
+if ! check_network; then
+    log "网络连接失败，尝试切换到PPPoE拨号"
+    
+    # 尝试修改为PPPoE配置
+    if setup_pppoe_network; then
+        log "等待网络重新连接..."
+        sleep 5  # 等待5秒让网络稳定
+        
+        # 第二次检查网络连接
+        if ! check_network; then
+            log "PPPoE拨号后网络仍然不可用，恢复原配置"
+            
+            # 恢复原网络配置
+            if restore_original_network; then
+                log "网络配置已恢复，但网络连接失败"
+                echo "网络连接失败，请检查网络设置"
+            else
+                log "恢复网络配置失败"
+                echo "网络连接失败且无法恢复配置"
+            fi
+        else
+            log "PPPoE拨号成功，网络已连接"
+        fi
+    else
+        log "切换到PPPoE失败，保持原配置"
+    fi
+else
+    log "网络连接正常，继续执行脚本"
+fi
+# ========== 新增的网络连接检查逻辑结束 ==========
 
 # 检查本地netconfig文件是否存在且有效（不小于1kb）
 if [ -f "/root/netconfig" ]; then
